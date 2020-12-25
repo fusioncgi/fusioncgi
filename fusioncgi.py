@@ -10,11 +10,16 @@ import os
 import shelve
 import sys
 import uuid
-from Cookie import SimpleCookie, SmartCookie
+import gzip
 from operator import attrgetter
 
+if sys.version_info < (3,):
+    from Cookie import BaseCookie, SimpleCookie
+else:
+    from http.cookies import BaseCookie, SimpleCookie
 
-class SuperCookie(SimpleCookie):
+
+class FusionCookie(SimpleCookie):
 
     def getvalue(self, key, default=None):
         """Dictionary style get() method, including 'value' lookup."""
@@ -28,47 +33,74 @@ class SuperCookie(SimpleCookie):
             return default
 
 
-class Web:
+class Request:
     def __init__(self):
         pass
 
-    Cookie = SmartCookie
-
-    @staticmethod
-    def json_response(data, cookie=None):
-        sys.stdout.write("Content-Type: application/json\n")
-        if cookie:
-            sys.stdout.write(str(cookie))
-            sys.stdout.write("\n")
-
-        sys.stdout.write("\n\n")
-        sys.stdout.write(json.dumps(data))
-        exit(0)
-
-    @staticmethod
-    def sse_head(cookie=None):
-        sys.stdout.write("Content-type: text/event-stream\n")
-        if cookie:
-            sys.stdout.write(str(cookie))
-            sys.stdout.write("\n")
-        sys.stdout.write("\n\n")
-
-    @staticmethod
-    def sse_body(data):
-        sys.stdout.write("data: {}\n\n".format(data))
-        sys.stdout.flush()
-
-    @staticmethod
-    def sse_json(data):
-        Web.sse_body(json.dumps(data))
-
     @staticmethod
     def cookie():
-        c = SuperCookie()
+        c = FusionCookie()
         if 'HTTP_COOKIE' in os.environ:
             cookie_string = os.environ.get('HTTP_COOKIE')
             c.load(cookie_string)
         return c
+
+
+class _Response:
+    _flush = sys.stdout.flush
+    _write = sys.stdout.write
+
+    def __init__(self):
+        self._cookie = FusionCookie()
+        self._header = {}
+
+    def _write_cookie(self):
+        if self._cookie:
+            self._write(str(self._cookie) + "\n")
+            self._cookie = None
+
+    def _write_head(self):
+        for k, v in self._header.items():
+            self._write(k + ": " + v + "\n")
+        self._write_cookie()
+        self._write("\n\n")
+
+    def _write_body(self, data):
+        self._write(data)
+        self._flush()
+
+    def _write_done(self, data):
+        self._write_head()
+        self._write_body(data)
+        exit(0)
+
+    def set_header(self, header):
+        self._header.update(header)
+
+    def set_cookie(self, cookie):
+        if isinstance(cookie, BaseCookie):
+            self._cookie.update(cookie)
+
+    def json(self, data, cookie=None):
+        if "Content-Type" not in Response._header:
+            self.set_header({"Content-Type": "application/json"})
+        self.set_cookie(cookie)
+        self._write_done(json.dumps(data))
+
+    def sse_head(self, cookie=None):
+        if "Content-Type" not in Response._header:
+            self.set_header({"Content-Type": "text/event-stream"})
+        self.set_cookie(cookie)
+        self._write_head()
+
+    def sse_body(self, data):
+        self._write_body("data: {}\n\n".format(data))
+
+    def sse_json(self, data):
+        self.sse_body(json.dumps(data))
+
+
+Response = _Response()
 
 
 class DataManage:
@@ -126,11 +158,6 @@ class Session:
                 for k, v in kwargs.items():
                     if k in db_session[sid] and v == db_session[sid][k]:
                         del db_session[sid]
-                        break
-                    pass
-                pass
-            pass
-        pass
 
 
 class Auth:
@@ -149,11 +176,11 @@ class Auth:
 
     @staticmethod
     def need_login():
-        c = Web.cookie()
+        c = Request.cookie()
         # noinspection PyUnresolvedReferences
         if Session.check(c.getvalue("sid")):
             return
-        Web.json_response({
+        Response.json({
             "code": 10001,
             "message": "not login",
         })
@@ -165,11 +192,14 @@ class Auth:
         sid = Session.new()
         with Session(sid) as session:
             session['username'] = username
-        return sid
+
+        cookie = FusionCookie()
+        cookie['sid'] = sid
+        Response.set_cookie(cookie)
 
     @staticmethod
     def logout():
-        c = Web.cookie()
+        c = Request.cookie()
         if "sid" in c and Session.check(c["sid"].value):
             Session.remove(c["sid"].value)
 
